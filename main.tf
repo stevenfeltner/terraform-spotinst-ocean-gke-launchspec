@@ -1,89 +1,96 @@
-terraform {
-  required_providers {
-    spotinst = {
-      source = "spotinst/spotinst"
-    }
-    google = {
-      source = "hashicorp/google"
-    }
-  }
-}
-
-### Providers ###
-provider "spotinst" {
-  token   = var.spot_token
-  account = var.spot_account
-}
-##################
-
-
-#Data source to pull most recent COS image URI
-data "google_compute_image" "COS" {
-  family  = "cos-stable"
-  project = "gke-node-images"
-}
-#Retrieve cluster info to get instance group URLS
-data "google_container_cluster" "gke" {
-  name     = var.cluster_name
-  location = var.location
-}
-#Retrieve template info for each node group
-data "google_compute_instance_template" "template" {
-  for_each = toset(local.template_name)
-  filter = "name eq ${each.key}.*"
-  most_recent = true
-  project = var.project
-}
-
-### Local resources ###
-locals {
-  # Get instance group URL and split to retrieve just the instance group name
-  instance_group_split = [for s in data.google_container_cluster.gke.instance_group_urls : split("/", s)]
-  # Store the list of instance group names from the specific cluster
-  instance_group_name = flatten([for s in local.instance_group_split : concat([s[10]])])
-  #Split the instance groups to remove the random generated suffix
-  template_name_split = [for s in local.instance_group_name : split("-", s)]
-  #Remove the suffix
-  template_size = [for s in local.template_name_split: slice(s, 0,length(s)-2)]
-  #Store the template prefix to retrieve the template data
-  template_name = [for s in local.template_size: join("-", s)]
-}
-#######################
-
-
 ### Spot Ocean Launchspec resource - create a launchspec using default node pool and add additional configurations. ###
 resource "spotinst_ocean_gke_launch_spec" "launchspec" {
-
   ocean_id            = var.ocean_id
-  source_image        = data.google_compute_image.COS.self_link
-  restrict_scale_down = false
+  node_pool_name      = var.node_pool_name
+  name                = var.name == null ? var.node_pool_name : var.name
+  source_image        = var.source_image
 
-  dynamic "metadata" {
-    for_each = data.google_compute_instance_template.template[local.template_name[0]].metadata
+#  dynamic "metadata" {
+#    for_each = data.google_compute_instance_template.template[local.template_name[0]].metadata
+#    content {
+#      key   = metadata.key
+#      value = metadata.value
+#    }
+#  }
+
+  dynamic taints {
+    for_each = var.taints == null ? [] : var.taints
     content {
-      key   = metadata.key
-      value = metadata.value
+      key       = taints.value["key"]
+      value     = taints.value["value"]
+      effect    = taints.value["effect"]
     }
-  }
-
-  strategy {
-    preemptible_percentage = var.preemptible_percentage
   }
 
   dynamic labels {
     for_each = var.labels == null ? [] : var.labels
     content {
-      key = labels.value["key"]
-      value = labels.value["value"]
+      key       = labels.value["key"]
+      value     = labels.value["value"]
     }
   }
 
-  dynamic taints {
-    for_each = var.taints == null ? [] : var.taints
+  restrict_scale_down   = var.restrict_scale_down
+  root_volume_type      = var.root_volume_tyoe
+  root_volume_size      = var.root_volume_size
+  instance_types        = var.instance_types
+
+
+
+  autoscale_headrooms_automatic {
+    auto_headroom_percentage = var.auto_headroom_percentage
+  }
+
+  dynamic "autoscale_headrooms" {
+    for_each = (
+    var.num_of_units != null &&
+    var.cpu_per_unit != null &&
+    var.gpu_per_unit != null &&
+    var.memory_per_unit != null
+    ) ? [1] : []
     content {
-      key = taints.value["key"]
-      value = taints.value["value"]
-      effect = taints.value["effect"]
+      cpu_per_unit    = var.num_of_units
+      gpu_per_unit    = var.cpu_per_unit
+      memory_per_unit = var.gpu_per_unit
+      num_of_units    = var.memory_per_unit
+    }
+  }
+
+  strategy {
+    preemptible_percentage  = var.preemptible_percentage
+  }
+
+  shielded_instance_config {
+    enable_integrity_monitoring = var.enable_integrity_monitoring
+    enable_secure_boot          = var.enable_secure_boot
+  }
+
+  dynamic "storage" {
+    for_each = var.local_ssd_count != null ? [1] : []
+    content {
+      local_ssd_count = var.local_ssd_count
+    }
+  }
+
+  resource_limits {
+    max_instance_count      = var.max_instance_count
+    min_instance_count      = var.min_instance_count
+  }
+
+  service_account           = var.service_account
+
+  dynamic "scheduling_task" {
+    for_each = var.scheduling_task != null ? [var.scheduling_task] : []
+    content {
+      is_enabled            = scheduling_task.value.is_enabled
+      cron_expression       = scheduling_task.value.cron_expression
+      task_type             = scheduling_task.value.task_type
+      task_headroom {
+        num_of_units        = scheduling_task.value.num_of_units
+        cpu_per_unit        = scheduling_task.value.cpu_per_unit
+        gpu_per_unit        = scheduling_task.value.gpu_per_unit
+        memory_per_unit     = scheduling_task.value.memory_per_unit
+      }
     }
   }
 }
